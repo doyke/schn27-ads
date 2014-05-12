@@ -1,0 +1,102 @@
+// mainloop.c - главный цикл
+
+#include <common.h>
+#include <adc.h>
+#include <interface.h>
+#include <maintimer.h>
+#include <config.h>
+#include <properties.h>
+#include <arraysize.h>
+#include <math.h>
+#include <temperature.h>
+
+
+void estimator_update(uint8_t curtime);
+
+
+// главный цикл
+void mainLoop(void)
+{
+	uint16_t data ps_raw = 0;
+	uint16_t data pd_raw = 0;
+	uint8_t time = 0;
+
+	for (;;)
+	{
+		uint8_t curtime = mainTimer_getTime();
+
+		WDT_RESET();
+
+		if (adc_get(&ps_raw, &pd_raw))				// новые значения от АЦП?
+		{
+			const float b = -0.0065;
+			const float R = 287.05;
+			const float g = 9.80665;
+
+			const float KPS = config.kps / config.kref / 65536.0f;
+			const float KPD = config.kpd / config.kref / 65536.0f;
+
+			properties.ps = ((ps_raw * KPS + 0.095f) / 0.009f) * 1000.0f;
+			properties.pd = 5000.0f * pd_raw * KPD - 1000.0f;
+
+			properties.altitude_raw = config.temp0 / b * (pow(properties.ps / config.ps0, -R * b / g) - 1);
+			estimator_update(curtime);
+		}
+
+		if (time != curtime)
+		{
+			time = curtime;
+			interface_update();
+			config_checkModified();
+			temperature_update();
+		}
+	}
+}
+
+
+/////////////////////////////////////////////////////////////////
+
+
+static void estimator_update(uint8_t curtime)
+{
+	static uint8_t time = 0;
+	const float var_h = config.var_h;
+	const float var_a = config.var_a;
+	static float p_hh = 1.e10;
+	static float p_hv = 0;
+	static float p_vv = 0;
+
+	float delta, s_inv, k_h, k_v;
+
+	const float dt = ((uint8_t)(curtime - time)) * 0.001f;
+	time = curtime;
+
+	// Predict step.
+	// Update state estimate.
+	properties.altitude += properties.vspeed * dt;
+
+	// Update state covariance. The last term mixes in acceleration noise.
+	p_hh += 2.0f * dt * p_hv + dt * dt * p_vv + var_a * dt * dt * dt * dt / 4.0f;
+	p_hv +=                         dt * p_vv + var_a * dt * dt * dt / 2.0f;
+	p_vv +=                                   + var_a * dt * dt;
+
+	// Update step.
+	delta = properties.altitude_raw - properties.altitude;  // Innovation.
+	s_inv = 1.0f / (p_hh + var_h);  // Innovation precision.
+	k_h = p_hh * s_inv;  // Kalman gain
+	k_v = p_hv * s_inv;
+
+	// Update state estimate.
+	properties.altitude += k_h * delta;
+	properties.vspeed += k_v * delta;
+
+	// Update state covariance.
+    p_vv -= p_hv * k_v;
+	p_hv -= p_hv * k_h;
+	p_hh -= p_hh * k_h;
+}
+
+
+
+
+

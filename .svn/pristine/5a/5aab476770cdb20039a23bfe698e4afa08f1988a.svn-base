@@ -1,0 +1,2 @@
+#undef DEVICE_STRING
+#define DEVICE_STRING "Ads,0.2"
